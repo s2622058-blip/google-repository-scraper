@@ -10,64 +10,90 @@ DB_NAME = "repositories.db"
 
 
 def scrape_repositories():
+    # ページにアクセスする前に1秒待つ
+    time.sleep(1)
+
     response = requests.get(
         URL,
         headers={"User-Agent": "Mozilla/5.0"},
         timeout=30,
     )
     response.raise_for_status()
-    soup = BeautifulSoup(response.text, "html.parser")
 
+    soup = BeautifulSoup(response.text, "html.parser")
     repositories = []
 
-    for card in soup.select("article"):
-        name_link = card.select_one("h3 a")
-        if not name_link:
+    # GitHubのリポジトリ一覧にあるリポジトリ名のリンクを探す
+    repo_links = soup.select('a[itemprop="name codeRepository"]')
+
+    for repo_link in repo_links:
+        href = repo_link.get("href", "")
+        name = href.strip("/").split("/")[-1]
+
+        if not name:
             continue
 
-        name = name_link.get_text(" ", strip=True).replace(" ", "")
-        language_tag = card.select_one('[itemprop="programmingLanguage"]')
-        language = language_tag.get_text(strip=True) if language_tag else "不明"
+        # リポジトリ情報を含む親要素から言語とスター数を探す
+        container = repo_link.find_parent("li")
+        if container is None:
+            container = repo_link.parent
 
-        star_link = card.select_one('a[href$="/stargazers"]')
-        stars = star_link.get_text(strip=True) if star_link else "0"
+        language_tag = container.select_one(
+            '[itemprop="programmingLanguage"]'
+        )
+        language = (
+            language_tag.get_text(strip=True)
+            if language_tag
+            else "不明"
+        )
+
+        star_link = container.select_one('a[href$="/stargazers"]')
+        stars = star_link.get_text(strip=True) if star_link else "不明"
 
         repositories.append((name, language, stars))
+
+    if not repositories:
+        raise RuntimeError(
+            "リポジトリを取得できませんでした。"
+            "GitHubのページ構造が変わった可能性があります。"
+        )
 
     return repositories
 
 
 def main():
     repositories = scrape_repositories()
+    print(f"{len(repositories)}件のリポジトリを取得しました。")
 
-    connection = sqlite3.connect(DB_NAME)
-    cursor = connection.cursor()
+    with sqlite3.connect(DB_NAME) as connection:
+        cursor = connection.cursor()
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS repositories (
-            name TEXT PRIMARY KEY,
-            language TEXT,
-            stars TEXT
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS repositories (
+                name TEXT PRIMARY KEY,
+                language TEXT,
+                stars TEXT
+            )
+        """)
+
+        cursor.executemany(
+            """
+            INSERT OR REPLACE INTO repositories (name, language, stars)
+            VALUES (?, ?, ?)
+            """,
+            repositories,
         )
-    """)
 
-    cursor.executemany(
-        """
-        INSERT OR REPLACE INTO repositories (name, language, stars)
-        VALUES (?, ?, ?)
-        """,
-        repositories,
-    )
-    connection.commit()
+        # DBに保存したデータをSELECTして表示する
+        cursor.execute("""
+            SELECT name, language, stars
+            FROM repositories
+            ORDER BY name
+        """)
 
-    # アクセスの間に1秒待つ
-    time.sleep(1)
-
-    cursor.execute("SELECT name, language, stars FROM repositories")
-    for name, language, stars in cursor.fetchall():
-        print(f"{name} | {language} | ★ {stars}")
-
-    connection.close()
+        print("\nデータベースの内容:")
+        for name, language, stars in cursor.fetchall():
+            print(f"{name} | {language} | ★ {stars}")
 
 
 if __name__ == "__main__":
